@@ -102,6 +102,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     continue
 
                 try:
+                    utils.logger.info(f"[XiaoHongShuCrawler.search] search xhs keyword: {keyword}, page: {page}")
                     note_id_list: List[str] = []
                     notes_res = await self.xhs_client.get_note_by_keyword(
                         keyword=keyword,
@@ -109,6 +110,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
                         sort=SearchSortType(config.SORT_TYPE) if config.SORT_TYPE != '' else SearchSortType.GENERAL,
                     )
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Search notes res:{notes_res}")
+                    if(not notes_res or not notes_res.get('has_more', False)):
+                        utils.logger.info("No more content!")
+                        break
                     semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
                     task_list = [
                         self.get_note_detail(post_item.get("id"), semaphore)
@@ -119,6 +123,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     for note_detail in note_details:
                         if note_detail is not None:
                             await xhs_store.update_xhs_note(note_detail)
+                            await self.get_notice_media(note_detail)
                             note_id_list.append(note_detail.get("note_id"))
                     page += 1
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Note details: {note_details}")
@@ -170,6 +175,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
         for note_detail in note_details:
             if note_detail is not None:
                 await xhs_store.update_xhs_note(note_detail)
+                await self.get_notice_media(note_detail)
         await self.batch_get_note_comments(config.XHS_SPECIFIED_ID_LIST)
 
     async def get_note_detail(self, note_id: str, semaphore: asyncio.Semaphore) -> Optional[Dict]:
@@ -276,3 +282,62 @@ class XiaoHongShuCrawler(AbstractCrawler):
         """Close browser context"""
         await self.browser_context.close()
         utils.logger.info("[XiaoHongShuCrawler.close] Browser context closed ...")
+
+    async def get_notice_media(self, note_detail: Dict):
+        if not config.ENABLE_GET_IMAGES:
+            utils.logger.info(f"[XiaoHongShuCrawler.get_notice_media] Crawling image mode is not enabled")
+            return
+        await self.get_note_images(note_detail)
+        await self.get_notice_video(note_detail)
+
+    async def get_note_images(self, note_item: Dict):
+        """
+        get note images. please use get_notice_media
+        :param note_item:
+        :return:
+        """
+        if not config.ENABLE_GET_IMAGES:
+            return
+        note_id = note_item.get("note_id")
+        image_list: List[Dict] = note_item.get("image_list", [])
+
+        for img in image_list:
+            if img.get('url_default') != '':
+                img.update({'url': img.get('url_default')})
+
+        if not image_list:
+            return
+        picNum = 0
+        for pic in image_list:
+            url = pic.get("url")
+            if not url:
+                continue
+            content = await self.xhs_client.get_note_media(url)
+            if content is None:
+                continue
+            extension_file_name = f"{picNum}.jpg"
+            picNum += 1
+            await xhs_store.update_xhs_note_image(note_id, content, extension_file_name)
+
+    async def get_notice_video(self, note_item: Dict):
+        """
+        get note images. please use get_notice_media
+        :param note_item:
+        :return:
+        """
+        if not config.ENABLE_GET_IMAGES:
+            return
+        note_id = note_item.get("note_id")
+
+        videos = xhs_store.get_video_url_arr(note_item)
+
+        if not videos:
+            return
+        videoNum = 0
+        for url in videos:
+            content = await self.xhs_client.get_note_media(url)
+            if content is None:
+                continue
+            extension_file_name = f"{videoNum}.mp4"
+            videoNum += 1
+            await xhs_store.update_xhs_note_image(note_id, content, extension_file_name)
